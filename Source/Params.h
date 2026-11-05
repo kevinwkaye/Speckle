@@ -39,6 +39,12 @@ inline constexpr auto loopReverse = "loopReverse";
 inline constexpr auto burst = "burst";
 inline constexpr auto loopOnly = "loopOnly";
 inline constexpr auto recOrder = "recOrder";
+inline constexpr auto expTarget = "expTarget";
+inline constexpr auto keeper = "keeper";
+// momentary actions, as parameters so a remote controller (the live rig) can press them
+inline constexpr auto actRec = "actRec";
+inline constexpr auto actStop = "actStop";
+inline constexpr auto actNextFx = "actNextFx";
 } // namespace ParamIDs
 
 namespace names
@@ -48,6 +54,25 @@ inline const juce::StringArray groups { "Micro Loop", "Micro Loop", "Micro Loop"
 inline const juce::StringArray subdivs { "1 bar", "1/2", "1/4 dot", "1/4", "1/4 trip", "1/8 dot", "1/8", "1/8 trip", "1/16" };
 inline constexpr float subdivBeats[9] = { 4.0f, 2.0f, 1.5f, 1.0f, 2.0f / 3.0f, 0.75f, 0.5f, 1.0f / 3.0f, 0.25f };
 inline const juce::StringArray reverbs { "Bright Room", "Dark Medium", "Large Hall", "Ambient" };
+
+// what an expression pedal can move: every knob on the panel
+struct ExpTarget { const char* id; const char* label; };
+inline const std::vector<ExpTarget>& expTargets()
+{
+    static const std::vector<ExpTarget> t {
+        { "activity", "Activity" }, { "repeats", "Repeats" }, { "shape", "Shape" }, { "modDepth", "Mod Depth" },
+        { "modRate", "Mod Rate" }, { "filter", "Filter" }, { "resonance", "Resonance" }, { "space", "Space" },
+        { "mix", "Mix" }, { "loopLevel", "Loop Level" }, { "loopSpeed", "Loop Speed" }, { "fadeTime", "Fade Time" },
+        { "volume", "Volume" },
+    };
+    return t;
+}
+inline juce::StringArray expTargetNames()
+{
+    juce::StringArray s;
+    for (const auto& t : expTargets()) s.add (t.label);
+    return s;
+}
 
 inline float modHz (float v01) { return 0.05f * std::pow (2.0f, v01 * 7.3f); }        // 0.05 .. 8 Hz
 inline float loopSpeedRaw (float v01) { return 0.25f * std::pow (16.0f, v01); }       // quarter .. 4x
@@ -149,6 +174,13 @@ inline juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout
     toggle (ParamIDs::hold, "Hold", false);
     toggle (ParamIDs::bypass, "Bypass", false);
     toggle (ParamIDs::trails, "Trails", true);
+
+    // ---- expression, Keeper and the footswitch actions ----
+    choice (ParamIDs::expTarget, "Expression Target", names::expTargetNames(), 0);
+    toggle (ParamIDs::keeper, "Keeper", false);
+    toggle (ParamIDs::actRec, "Loop Rec / Dub", false);
+    toggle (ParamIDs::actStop, "Loop Stop / Play", false);
+    toggle (ParamIDs::actNextFx, "Next Effect", false);
 
     return layout;
 }

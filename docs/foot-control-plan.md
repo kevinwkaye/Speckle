@@ -1,5 +1,7 @@
 # Speckle foot control plan
 
+**Status: built 5 November 2026.** Everything below is in the plugin, with `speckle_pedal_test` covering point 11. Keeper is built, not just reserved.
+
 Written 4 November 2026 from a cross-plugin audit. Build it in Speckle's own thread.
 
 ## What happens today

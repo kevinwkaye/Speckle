@@ -25,6 +25,7 @@ struct FxParams
     bool reverse = false;
     float stepSamples = 12000.0f;   // the Time subdivision
     float beatSamples = 24000.0f;
+    float level = 0.0f;             // how loud you've been playing lately (mean level, slow release)
 };
 
 struct OnsetRing
@@ -53,6 +54,10 @@ public:
 
     void reset()
     {
+        lastOnsetSeen = -1;
+        lastGlideTime = 0;
+        runQueued = 0;
+        echoAt[0] = echoAt[1] = 0;
         for (auto& v : loops) v = LoopVoice();
         seq = SeqState(); haze = HazeState(); tun = TunnelState(); strum = StrumState();
         blocks = BlocksState(); intr = InterruptState(); arp = ArpState();
@@ -161,15 +166,46 @@ private:
     }
 
     // rough level of a stretch of the past, to avoid looping silence
-    float energy (double start, int len) const
+    float energy (double start, int len, int probes = 96) const
     {
+        const double oldest = std::max (0.0, (double) now - (double) hist->capacity() + 8.0);
+        if (start < oldest) { len -= (int) (oldest - start); start = oldest; }
         if (start + len > (double) now) len = (int) std::max (0.0, (double) now - start);
         if (len < 64) return 0.0f;
         float sum = 0.0f;
-        for (int k = 0; k < 96; ++k) sum += std::fabs (hist->readMono (History::Full, start + (double) k * len / 96.0));
-        return sum / 96.0f;
+        for (int k = 0; k < probes; ++k) sum += std::fabs (hist->readMono (History::Full, start + (double) k * len / probes));
+        return sum / (float) probes;
     }
-    static constexpr float kQuiet = 0.004f;
+    // Quiet means quiet compared with how you've been playing, so soft playing and a hot
+    // synth both work. A fixed threshold made the micro loops ignore gentle guitar.
+    float quiet() const { return std::max (2.0e-5f, 0.07f * par.level); }
+    bool audible (double start, int len) const { return energy (start, len, 48) > quiet(); }
+
+    // Where sound first appears in a stretch of the past, as a fraction 0..1, or -1 for none
+    float firstAudible (double start, int len) const
+    {
+        const int probes = 32, span = std::max (1, len / probes);
+        for (int k = 0; k < probes; ++k)
+            if (energy (start + (double) k * span, span, 12) > quiet()) return (float) k / probes;
+        return -1.0f;
+    }
+
+    // Eight slices of a window: which have something in them
+    int audibleSlices (double window, float L, int steps, std::array<bool, 16>& mask) const
+    {
+        int count = 0;
+        for (int k = 0; k < steps; ++k) { mask[(size_t) k] = audible (window + k * L, (int) L); count += mask[(size_t) k] ? 1 : 0; }
+        return count;
+    }
+    int pickSlice (const std::array<bool, 16>& mask, int steps, int preferred)
+    {
+        if (mask[(size_t) (preferred % steps)]) return preferred % steps;
+        for (int tries = 0; tries < 8; ++tries) { const int k = (int) (rnd() * steps) % steps; if (mask[(size_t) k]) return k; }
+        for (int k = steps - 1; k >= 0; --k) if (mask[(size_t) k]) return k;
+        return -1;
+    }
+    // windows of eight steps must fit well inside the history
+    float windowStep (int steps) const { return std::min (stepLen(), 0.75f * (float) hist->capacity() / (float) (steps + 2)); }
 
     float stepLen() const { return clampf (par.stepSamples, 0.03f * fs, 6.0f * fs); }
     int samples (float seconds) const { return (int) (seconds * fs); }
@@ -197,6 +233,27 @@ private:
     };
     std::array<LoopVoice, 6> loops;
 
+    // Grab a fresh loop for a voice. If the stretch is silent, or your note only arrives
+    // late in it, wait until a whole loop's worth of the note is in, so it never loops silence.
+    bool captureLoop (LoopVoice& v, int segLen, float readSpeed)
+    {
+        const int span = (int) (segLen * readSpeed);
+        const double seg = (double) now - margin - span;
+        const float first = firstAudible (seg, span);
+        if (first < 0.0f) { v.next = now + (int64_t) (0.05f * fs); v.gain = 0.0f; return false; }
+        if (first > 0.2f)
+        {
+            // come back once the loop can start where the sound starts
+            v.next = now + (int64_t) (first * span) + 1;
+            v.gain = 0.0f;
+            return false;
+        }
+        v.segLen = segLen;
+        v.seg = seg;
+        v.gain = 1.0f;
+        return true;
+    }
+
     void doMosaic()
     {
         static const float speeds[4][6] = { { 1, 2, 1, 2, 1, 2 }, { 1, 0.5f, 1, 0.5f, 1, 0.5f }, { 2, 2, 2, 2, 2, 2 }, { 0.5f, 1, 2, 4, 1, 2 } };
@@ -221,12 +278,8 @@ private:
             if (now < v.next) continue;
 
             v.speed = speeds[par.variant & 3][i];
-            if (v.gain < 0.05f)
-            {
-                v.segLen = (int) clampf (stepLen() * mults[i], 0.05f * fs, 8.0f * fs);
-                v.seg = (double) now - margin - v.segLen;
-                v.gain = energy (v.seg, v.segLen) > kQuiet ? 1.0f : 0.0f;
-            }
+            if (v.gain < 0.05f && ! captureLoop (v, (int) clampf (stepLen() * mults[i], 0.05f * fs, 8.0f * fs), 1.0f))
+                continue;
             const int period = std::max (64, (int) ((float) v.segLen / v.speed));
             GrainSpec g;
             g.speedA = g.speedB = v.speed;
@@ -237,7 +290,7 @@ private:
             g.gain = v.gain * norm;
             g.pan = pans[i];
             placeSegment (g, v.seg);
-            if (v.gain > 0.0f) pool.spawn (g);
+            pool.spawn (g);
             v.gain *= decay;
             v.next += period;
             if (v.next < now) v.next = now + period;
@@ -245,33 +298,36 @@ private:
     }
 
     // ===================================================================== SEQ
-    struct SeqState { bool init = false, quiet = true; double window = 0; int64_t next = 0; int step = 0, barsLeft = 0; };
+    struct SeqState { bool init = false; int audible = 0; std::array<bool, 16> mask {}; double window = 0; int64_t next = 0; int step = 0, barsLeft = 0; };
     SeqState seq;
 
     void doSeq()
     {
-        const float L = stepLen();
         const int steps = 8;
+        const float L = windowStep (steps);
         if (! seq.init) { seq.init = true; seq.next = now; seq.step = 0; seq.barsLeft = 0; seq.window = (double) now - margin - steps * L; }
         if (now < seq.next) return;
         seq.next += (int64_t) L;
         if (seq.next < now) seq.next = now + (int64_t) L;
 
-        // a quiet window is swapped for fresh audio straight away
-        if (seq.quiet || (seq.step == 0 && seq.barsLeft <= 0))
+        // Capture a new sequence when the repeats run out, and keep refreshing it while it
+        // holds fewer than half its steps' worth of sound (you only just started playing).
+        if (seq.step == 0 && seq.barsLeft <= 0) seq.audible = 0;
+        if (seq.audible < steps / 2)
         {
             seq.window = (double) now - margin - steps * L;
+            seq.audible = audibleSlices (seq.window, L, steps, seq.mask);
             seq.barsLeft = par.repeats > 0.97f ? 1 << 30 : 1 + (int) std::lround (par.repeats * 7.0f);
-            seq.quiet = energy (seq.window, (int) (steps * L)) < kQuiet;
         }
         if (seq.step == 0) --seq.barsLeft;
-        if (seq.quiet) { seq.step = (seq.step + 1) % steps; return; }
+        if (seq.audible == 0) { seq.step = (seq.step + 1) % steps; return; }
         const int v = par.variant & 3;
         const float a = par.activity;
         const int fade = samples (0.004f);
 
         auto slice = [&] (float speed, int len, float gain, float pan, int which)
         {
+            which = std::max (0, pickSlice (seq.mask, steps, which));
             GrainSpec g;
             g.speedA = g.speedB = speed;
             g.length = len + fade;
@@ -355,12 +411,8 @@ private:
             if (! lv.on) { lv = LoopVoice(); lv.on = true; lv.next = now + i * hop / 2; lv.gain = 0.0f; }
             if (now < lv.next) continue;
             const float maxSpeed = std::max (ranges[v][0], ranges[v][1]);
-            if (lv.gain < 0.05f)
-            {
-                lv.segLen = G;
-                lv.seg = (double) now - margin - maxSpeed * G - i * stepLen();
-                lv.gain = energy (lv.seg, (int) (maxSpeed * G)) > kQuiet ? 1.0f : 0.0f;
-            }
+            if (lv.gain < 0.05f && ! captureLoop (lv, G, maxSpeed))
+                continue;
             GrainSpec g;
             g.speedA = ranges[v][0];
             g.speedB = ranges[v][1];
@@ -372,7 +424,7 @@ private:
             g.gain = 0.72f * lv.gain;
             g.pan = i == 0 ? -0.4f : 0.4f;
             placeSegment (g, lv.seg);
-            if (lv.gain > 0.0f) pool.spawn (g);
+            pool.spawn (g);
             lv.gain *= decay;
             lv.next += hop;
             if (lv.next < now) lv.next = now + hop;
@@ -444,7 +496,8 @@ private:
         const float base = clampf (stepLen() * 0.5f, 0.06f * fs, 0.3f * fs);
 
         if (newOnset) tun.captureAt = ring->latest + samples (0.04f);
-        if (! tun.captured && tun.captureAt < 0) tun.captureAt = now; // start droning straight away
+        // start droning straight away on whatever is already sounding
+        if (! tun.captured && tun.captureAt < 0 && audible ((double) now - margin - base, (int) base)) tun.captureAt = now - (int64_t) (base * 1.5f);
         float Lg = base;
         const float t = (float) now / fs;
         if (v == 0) Lg = base * (1.0f + 0.65f * a * std::sin (kTwoPi * 0.17f * t));
@@ -457,10 +510,14 @@ private:
 
         if (tun.captureAt >= 0 && now >= tun.captureAt + (int64_t) (base * 1.5f) + margin)
         {
-            tun.seg = (double) tun.captureAt;
-            tun.captured = true;
-            tun.gain = 1.0f;
-            tun.onsetTime = tun.captureAt;
+            // a drone of silence is no drone: keep the old one, or wait for the next note
+            if (audible ((double) tun.captureAt, (int) base))
+            {
+                tun.seg = (double) tun.captureAt;
+                tun.captured = true;
+                tun.gain = 1.0f;
+                tun.onsetTime = tun.captureAt;
+            }
             tun.captureAt = -1;
         }
         if (! tun.captured || now < tun.next) return;
@@ -573,28 +630,37 @@ private:
     }
 
     // ================================================================== BLOCKS
-    struct BlocksState { int stepsLeft = 0, step = 0; double window = 0; int64_t next = 0; };
+    struct BlocksState { int stepsLeft = 0, step = 0, audible = 0; bool fresh = false; std::array<bool, 16> mask {}; double window = 0; int64_t next = 0; };
     BlocksState blocks;
 
     void doBlocks()
     {
         const int v = par.variant & 3;
         const float a = par.activity;
-        const float L = stepLen() * 0.5f;
+        const float L = std::min (stepLen() * 0.5f, windowStep (8));
+        // A note starts a run of blocks. Let two steps of it in first, so the blocks are made of
+        // what you just played rather than the silence before it.
         if (newOnset && blocks.stepsLeft <= 0)
         {
             blocks.stepsLeft = par.repeats > 0.97f ? 1 << 30 : 2 + (int) std::lround (par.repeats * par.repeats * 30.0f);
             blocks.step = 0;
-            blocks.window = (double) now - margin - 8.0 * L;
-            blocks.next = now;
+            blocks.next = now + (int64_t) (2.0f * L);
+            blocks.fresh = true;
         }
         if (blocks.stepsLeft <= 0 || now < blocks.next) return;
         blocks.next = now + (int64_t) L;
         --blocks.stepsLeft;
-        if (par.repeats > 0.97f && (blocks.step % 16) == 15) blocks.window = (double) now - margin - 8.0 * L;
+        // the window rolls on every eight steps, so the blocks keep up with your playing
+        if (blocks.fresh || (blocks.step % 8) == 0)
+        {
+            blocks.window = (double) now - margin - 8.0 * L;
+            blocks.audible = audibleSlices (blocks.window, L, 8, blocks.mask);
+            blocks.fresh = false;
+        }
+        if (blocks.audible == 0) { ++blocks.step; return; }
 
         // little variation: a predictable backwards walk. More: random slices and changes
-        const int which = rnd() < a ? (int) (rnd() * 8) % 8 : 7 - (blocks.step % 8);
+        const int which = pickSlice (blocks.mask, 8, rnd() < a ? (int) (rnd() * 8) % 8 : 7 - (blocks.step % 8));
         const int fade = samples (0.003f);
         GrainSpec g;
         g.length = (int) L + fade;
@@ -607,13 +673,14 @@ private:
         if (v == 0 && rnd() < a * 0.5f && onsetReady (0)) // a run of recent notes
         {
             const int runLen = (int) (L / 4);
+            int filled = 0;
             for (int k = 0; k < 4; ++k)
             {
                 const int back = ring->count > 1 ? k % std::min (ring->count, 4) : 0;
                 if (! onsetReady (back)) continue;
-                runQueue[k] = note (back, 1.0f, runLen, 0.55f, rndPan (0.6f));
+                runQueue[filled++] = note (back, 1.0f, runLen, 0.55f, rndPan (0.6f));
             }
-            runQueued = 4; runEvery = runLen; runNext = now;
+            runQueued = filled; runTotal = filled; runEvery = runLen; runNext = now;
         }
         else
         {
@@ -639,13 +706,13 @@ private:
     }
 
     GrainSpec runQueue[4];
-    int runQueued = 0, runEvery = 0;
+    int runQueued = 0, runTotal = 0, runEvery = 0;
     int64_t runNext = 0;
     void fireRuns()
     {
         while (runQueued > 0 && now >= runNext)
         {
-            pool.spawn (runQueue[4 - runQueued]);
+            pool.spawn (runQueue[runTotal - runQueued]);
             --runQueued;
             runNext += runEvery;
         }
@@ -662,6 +729,8 @@ private:
         const float L = stepLen();
         if (intr.next == 0) intr.next = now + (int64_t) (L * 2.0f);
 
+        if (! intr.active && now >= intr.next && ! audible ((double) now - margin - 2.0 * L, (int) (2.0 * L)))
+            intr.next = now + (int64_t) (0.25f * L); // nothing to glitch yet: let the live sound through
         if (! intr.active && now >= intr.next)
         {
             intr.active = true;

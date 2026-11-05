@@ -25,6 +25,16 @@ inline float contour (float t, float shape)
     return 1.0f;
 }
 
+// Shape changes the contour, not the loudness: a plucked or swelling grain is lifted back
+// to the level of an even one, so turning Shape doesn't make the effect vanish.
+inline float contourMakeup (float shape)
+{
+    if (shape >= 0.47f && shape <= 0.53f) return 1.0f;
+    float sum = 0.0f;
+    for (int k = 0; k < 24; ++k) { const float c = contour ((k + 0.5f) / 24.0f, shape); sum += c * c; }
+    return clampf (1.0f / std::sqrt (std::max (1.0e-4f, sum / 24.0f)), 1.0f, 4.0f);
+}
+
 struct GrainSpec
 {
     const History* src = nullptr;
@@ -77,8 +87,9 @@ public:
         g.phase = s.glidePhase;
         g.glideInc = s.glideHz / fs;
         const float a = (clampf (s.pan, -1.0f, 1.0f) + 1.0f) * (kPi * 0.25f);
-        g.gL = s.gain * std::cos (a) * 1.41421356f;
-        g.gR = s.gain * std::sin (a) * 1.41421356f;
+        const float makeup = contourMakeup (s.shape);
+        g.gL = s.gain * makeup * std::cos (a) * 1.41421356f;
+        g.gR = s.gain * makeup * std::sin (a) * 1.41421356f;
         g.f[0].reset(); g.f[1].reset();
         g.held[0] = g.held[1] = 0.0f;
         g.holdCount = 0;

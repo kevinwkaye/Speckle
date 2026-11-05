@@ -42,8 +42,18 @@ public:
     }
 
     // ---- commands (audio thread) ----
+    // A loop shorter than this is never made. Ending a recording sooner than this was the
+    // "0.1 second pad" bug: a double press or a quick Burst tap closed a tiny loop.
+    static constexpr float kMinSeconds = 0.25f;
+    // presses closer together than this are one press (a footswitch that sends twice, a bounce)
+    static constexpr float kDebounceSeconds = 0.08f;
+
     void pressRec()
     {
+        if (sinceRec < (int64_t) (kDebounceSeconds * fs)) return;
+        sinceRec = 0;
+        if (state == Recording && recPos < minLen()) return; // too soon: keep recording
+        beforePress = state;
         switch (state)
         {
             case Empty: case Stopped:
@@ -58,6 +68,7 @@ public:
     void holdRec() { if (len > 0) { clearDub(); if (state == Overdubbing) state = Playing; } }
     void pressStop()
     {
+        if (state == Recording && recPos < minLen()) { erase(); return; } // nothing worth keeping yet
         if (state == Recording) { closeLoop (false); }
         if (state == Playing || state == Overdubbing)
         {
@@ -68,7 +79,24 @@ public:
     }
     void erase() { clearDub(); state = Empty; len = 0; recPos = 0; playPos = 0.0; playGain = 0.0f; tailValid = false; seam = false; }
     void burstDown() { erase(); startRecording(); }
-    void burstUp() { if (state == Recording) closeLoop (false); }
+    void burstUp()
+    {
+        if (state != Recording) return;
+        if (recPos < minLen()) erase(); // a tap too short to loop records nothing
+        else closeLoop (false);
+    }
+    int minLen() const { return (int) (kMinSeconds * fs); }
+
+    // Footswitch C acts the moment it goes down, so the loop starts on time. If D joins it a
+    // moment later, the pair was a C+D combo, and that first press is taken back.
+    void revertPress()
+    {
+        if (sinceRec > (int64_t) (0.3f * fs)) return;
+        if (state == Recording && beforePress != Recording) erase();
+        else if (state == Overdubbing && beforePress == Playing) state = Playing;
+        else if (state == Playing && (beforePress == Stopped || beforePress == Stopping)) { state = Stopped; playGain = 0.0f; playPos = 0.0; }
+        sinceRec = 1 << 30;
+    }
 
     // in: what gets recorded. out: loop playback added here.
     void process (const float* inL, const float* inR, float* outL, float* outR, int n, const Settings& s)
@@ -82,6 +110,7 @@ public:
         }
         const float step = speed * (s.reverse ? -1.0f : 1.0f);
 
+        sinceRec += n;
         for (int i = 0; i < n; ++i)
         {
             const float level = lvl.next (s.level);
@@ -191,7 +220,7 @@ private:
             n = std::min (cap, (int) std::lround (beats * settings.beatSamples));
             for (int i = recPos; i < n; ++i) { base[0][(size_t) i] = 0.0f; base[1][(size_t) i] = 0.0f; }
         }
-        len = std::max (n, xf * 2 + 4);
+        len = std::max (n, std::max (minLen(), xf * 2 + 4));
         for (int i = recPos; i < len; ++i) { base[0][(size_t) i] = 0.0f; base[1][(size_t) i] = 0.0f; }
         playPos = settings.reverse ? (double) (len - 1) : 0.0;
         tailFill = 0;
@@ -254,10 +283,11 @@ private:
 
     float fs = 48000.0f;
     int cap = 0, xf = 512, len = 0, recPos = 0, tailFill = 0;
+    int64_t sinceRec = 1 << 30;
     bool tailValid = false, aaActive = false, seam = false;
     double playPos = 0.0;
     float playGain = 0.0f, fadeRate = 0.01f, aaSpeed = 1.0f, dubGain = 0.0f, dubRamp = 0.002f;
-    State state = Empty;
+    State state = Empty, beforePress = Empty;
     Settings settings;
     std::vector<float> base[2], dub[2], tail[2];
     Butter4 aa[2];

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(Speckle VERSION 0.1.0 LANGUAGES C CXX)
+project(Speckle VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,7 +57,9 @@ if(SPECKLE_BUILD_PLUGIN)
 
     target_sources(Speckle PRIVATE
         Source/PluginProcessor.cpp
-        Source/PluginEditor.cpp)
+        Source/PluginEditor.cpp
+        Source/PedalControl.cpp
+        Source/Keeper.cpp)
 
     target_include_directories(Speckle PRIVATE Source Source/engine)
 
@@ -79,9 +81,31 @@ if(SPECKLE_BUILD_PLUGIN)
 endif()
 
 # ---------------------------------------------------------------------------
-# Offline engine test (no JUCE needed): renders test audio through every voice
+# Offline engine test (no JUCE needed): renders test audio through every effect
 # ---------------------------------------------------------------------------
 if(SPECKLE_BUILD_TESTS)
     add_executable(speckle_render_test Tests/RenderTest.cpp)
     target_include_directories(speckle_render_test PRIVATE Source/engine)
+
+    # Footswitch test: drives the real plugin with footswitch MIDI (needs JUCE)
+    if(SPECKLE_BUILD_PLUGIN)
+        juce_add_console_app(speckle_pedal_test PRODUCT_NAME "speckle_pedal_test")
+        target_sources(speckle_pedal_test PRIVATE
+            Tests/PedalTest.cpp
+            Source/PluginProcessor.cpp
+            Source/PluginEditor.cpp
+            Source/PedalControl.cpp
+            Source/Keeper.cpp)
+        target_include_directories(speckle_pedal_test PRIVATE Source Source/engine)
+        target_compile_definitions(speckle_pedal_test PRIVATE
+            JUCE_WEB_BROWSER=0
+            JUCE_USE_CURL=0
+            JUCE_MODAL_LOOPS_PERMITTED=1
+            JucePlugin_VersionString="${PROJECT_VERSION}")
+        target_link_libraries(speckle_pedal_test PRIVATE
+            SpeckleData
+            juce::juce_audio_utils
+            juce::juce_dsp
+            juce::juce_recommended_config_flags)
+    endif()
 endif()

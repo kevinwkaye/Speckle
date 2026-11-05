@@ -16,13 +16,17 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Configure
-        run: cmake -S . -B build -DJETSTREAM_BUILD_TESTS=ON
+        run: cmake -S . -B build -DSPECKLE_BUILD_TESTS=ON
 
       - name: Build
         run: cmake --build build --config Release --parallel 4
 
-      - name: Engine render test
+      - name: Engine render test and CPU report
         run: build\Release\speckle_render_test.exe
+
+      - name: Footswitch test
+        continue-on-error: true
+        run: build\speckle_pedal_test_artefacts\Release\speckle_pedal_test.exe
 
       - name: Validate with pluginval
         id: pluginval
@@ -46,6 +50,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           Copy-Item -Recurse build\Speckle_artefacts\Release\VST3\Speckle.vst3 dist\
           Copy-Item build\Speckle_artefacts\Release\Standalone\Speckle.exe dist\Speckle-standalone.exe
+          Copy-Item README.md dist\
           if (Test-Path pluginval-report.txt) { Copy-Item pluginval-report.txt dist\ }
 
       # Artifact storage counts against the account quota, so the finished
@@ -61,3 +66,42 @@ jobs:
           git add -f Speckle-Windows.zip
           git commit -q -m "Windows build $env:GITHUB_SHA"
           git push -f origin builds
+
+  # The live rig runs on a Raspberry Pi, so every plugin also builds for Linux on ARM64.
+  # Portability problems show up here long before the rig exists.
+  linux-arm64:
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ninja-build libfreetype-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libasound2-dev libfontconfig1-dev xvfb
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSPECKLE_BUILD_TESTS=ON
+
+      - name: Build
+        run: cmake --build build --target Speckle_VST3 speckle_render_test speckle_pedal_test
+
+      - name: Engine render test and CPU report
+        run: build/speckle_render_test
+
+      - name: Footswitch test
+        run: xvfb-run -a build/speckle_pedal_test_artefacts/Release/speckle_pedal_test
+
+      - name: Publish to the builds-linux-arm64 branch
+        run: |
+          cd build/Speckle_artefacts/Release/VST3
+          zip -qr "$GITHUB_WORKSPACE/Speckle-Linux-ARM64.zip" Speckle.vst3
+          cd "$GITHUB_WORKSPACE"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout --orphan builds-linux-arm64
+          git rm -r -q --cached .
+          git add -f Speckle-Linux-ARM64.zip
+          git commit -q -m "Linux ARM64 build $GITHUB_SHA"
+          git push -f origin builds-linux-arm64

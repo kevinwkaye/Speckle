@@ -47,6 +47,8 @@ public:
     void setTextHeight (float h) { textHeight = h; }
     void advance (double dt);
     void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent& e) override { if (onClick) onClick (e); }
+    std::function<void (const juce::MouseEvent&)> onClick;
 
 private:
     void drawHalf (juce::Graphics&, juce::Rectangle<float> card, const juce::String& text, bool top, float scale, bool shade);
@@ -101,6 +103,24 @@ private:
     juce::StringArray labels;
     int value = 0;
     std::unique_ptr<juce::ParameterAttachment> attachment;
+};
+
+// A plain pill button that runs a function.
+class ActionChip : public juce::Component
+{
+public:
+    ActionChip (const juce::String& t, std::function<void()> fn, float textSize = 12.0f)
+        : text (t), action (std::move (fn)), size (textSize) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics& g) override;
+    void mouseDown (const juce::MouseEvent&) override { if (action) action(); }
+    void setLit (bool l) { if (l != lit) { lit = l; repaint(); } }
+    void setText (const juce::String& t) { if (t != text) { text = t; repaint(); } }
+
+private:
+    juce::String text;
+    std::function<void()> action;
+    float size;
+    bool lit = false;
 };
 
 class FlipLookAndFeel : public juce::LookAndFeel_V4
@@ -237,18 +257,94 @@ private:
     bool saved = false;
 };
 
-// Pebble from Flip Fella, reacting to the effect.
+enum class View { Main, Pedal };
+
+// One footswitch on the Pedal page: its jobs, what it listens for, Learn and Defaults.
+class FootswitchCard : public juce::Component
+{
+public:
+    FootswitchCard (SpeckleProcessor&, int sw);
+    void paint (juce::Graphics&) override;
+    void resized() override;
+    void tick();
+
+private:
+    SpeckleProcessor& proc;
+    int sw;
+    FlipCard letter;
+    ActionChip learn, reset;
+    std::unique_ptr<ToggleChip> trails;
+    juce::String sends;
+};
+
+// The Keep button: two lines, centred, and a right-click menu.
+class BigButton : public juce::Component
+{
+public:
+    std::function<void()> onDown, onRightClick;
+    void set (const juce::String& main, const juce::String& small, juce::Colour border);
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+    void mouseUp (const juce::MouseEvent&) override { pressed = false; repaint(); }
+
+private:
+    juce::String mainText, smallText;
+    juce::Colour borderColour = ff::line;
+    bool pressed = false;
+};
+
+// Small A to D squares that act exactly like the footswitches, and light when one is pressed.
+class MiniFoot : public juce::Component
+{
+public:
+    MiniFoot (SpeckleProcessor& p, int s) : proc (p), sw (s) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override { proc.footDown (sw); }
+    void mouseUp (const juce::MouseEvent&) override { proc.footUp (sw); }
+
+private:
+    SpeckleProcessor& proc;
+    int sw;
+};
+
+// "FOOTSWITCHES": a dot that lights when the footswitch is heard, and a menu for where it's read from.
+class FootInputLabel : public juce::Component
+{
+public:
+    explicit FootInputLabel (SpeckleProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    SpeckleProcessor& proc;
+};
+
+// The expression pedal's live position. Click for its target, Learn, Calibrate and the pedal's MIDI map.
+class ExpressionMeter : public juce::Component
+{
+public:
+    explicit ExpressionMeter (SpeckleProcessor& p) : proc (p) { setMouseCursor (juce::MouseCursor::PointingHandCursor); }
+    void paint (juce::Graphics&) override;
+    void mouseDown (const juce::MouseEvent&) override;
+
+private:
+    SpeckleProcessor& proc;
+};
+
+// Pebble from Flip Fella, reacting to the effect, the footswitches and the expression pedal.
 class Pebble : public juce::Component
 {
 public:
     explicit Pebble (SpeckleProcessor& p) : proc (p) {}
     void update (double now, double dt);
     void paint (juce::Graphics&) override;
+    void nod() { nodding = 1.0f; }
 
 private:
     SpeckleProcessor& proc;
-    float level = 0, wet = 0, look = 0, mouth = 0, hop = 0;
+    float level = 0, wet = 0, look = 0, mouth = 0, hop = 0, lean = 0, nodding = 0;
     bool asleep = false, blinking = false, held = false;
+    int lastPulse = 0;
     double lastSound = 0, nextBlink = 2.0, blinkUntil = 0, now = 0;
 };
 } // namespace ui
@@ -265,16 +361,25 @@ public:
 private:
     void timerCallback() override;
     void section (juce::Graphics&, juce::Rectangle<int>) const;
+    void setView (ui::View);
+    void keeperMenu();
+    void closeNote (bool save);
 
     SpeckleProcessor& proc;
     ui::FlipLookAndFeel lnf;
     double lastTick = 0;
+    ui::View view = ui::View::Main;
+    std::vector<juce::Component*> mainPage;
 
     // header
     ui::Pills inputMode;
     ui::FlipCard tempoCard;
     ui::TapButton tapButton;
-    ui::ToggleChip sync, trails;
+    ui::ToggleChip sync;
+    ui::ActionChip viewMain, viewPedal;
+
+    // pedal page
+    std::array<std::unique_ptr<ui::FootswitchCard>, 4> footCards;
 
     // effect
     ui::FlipCard groupCard, effectCard;
@@ -302,9 +407,19 @@ private:
     ui::Pebble pebble;
     ui::FootSwitch hold, bypass;
     ui::PresetBanks banks;
+    std::array<std::unique_ptr<ui::MiniFoot>, 4> minis;
+    ui::FootInputLabel footInput;
+    ui::ExpressionMeter expression;
+
+    // Keeper
+    ui::BigButton keepButton;
+    ui::FlipCard contextCard;
+    juce::TextEditor noteEditor;
+    int noteNumber = 0, lastKeepPulse = 0, lastEffect = -1;
+    double keptUntil = 0.0, noteUntil = 0.0;
 
     int boundTimeMode = -1;
-    juce::String timeHint, reverbName, loopStatus, holdStatus;
+    juce::String timeHint, reverbName, loopStatus, mood, moodSub;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpeckleEditor)
 };

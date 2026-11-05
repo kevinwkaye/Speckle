@@ -34,7 +34,7 @@ struct EngineParams
 class SpeckleEngine
 {
 public:
-    enum Command { CmdRec = 1, CmdUndo = 2, CmdStop = 4, CmdErase = 8, CmdBurstDown = 16, CmdBurstUp = 32, CmdClearAll = 64 };
+    enum Command { CmdRec = 1, CmdUndo = 2, CmdStop = 4, CmdErase = 8, CmdBurstDown = 16, CmdBurstUp = 32, CmdClearAll = 64, CmdRevert = 128 };
 
     // ---- read by the panel ----
     std::atomic<float> uiWet { 0.0f }, uiInput { 0.0f };
@@ -51,6 +51,11 @@ public:
         reverb.prepare (fs);
         looper.prepare (fs);
         onsets.clear();
+        env = envAtOnset = playLevel = 0.0f;
+        sinceOnset = 1 << 29;
+        envAtt = 1.0f - std::exp (-1.0f / (0.005f * fs));
+        envRel = 1.0f - std::exp (-1.0f / (0.25f * fs));
+        levelRel = std::exp (-1.0f / (3.0f * fs));
 
         holdRing.init (nextPow2 ((int) (4.0f * fs)));
         holdRingR.init (holdRing.size());
@@ -95,6 +100,7 @@ public:
         if (cmd & CmdUndo) looper.holdRec();
         if (cmd & CmdStop) looper.pressStop();
         if (cmd & CmdErase) looper.erase();
+        if (cmd & CmdRevert) looper.revertPress();
 
         if (p.reverbMode != lastReverbMode) { reverb.setMode (p.reverbMode); lastReverbMode = p.reverbMode; }
         detector.setMode (p.inputMode);
@@ -162,8 +168,10 @@ private:
             effL[i] = l; effR[i] = r;
             level = std::max (level, std::fabs (l) + std::fabs (r));
 
-            const float on = detector.process (0.5f * (l + r));
-            if (on > 0.0f) { onsets.add (hist.writePos(), on); uiOnset.store (true); }
+            const float mono = 0.5f * (l + r);
+            const float on = detector.process (mono);
+            if (on > 0.0f) { addOnset (on); }
+            else sustainedNote (mono, p.beatSamples);
 
             const float fb = fx.feedback();
             hist.push (softClip (l + fbL[(size_t) i] * fb), softClip (r + fbR[(size_t) i] * fb));
@@ -174,6 +182,7 @@ private:
         FxParams fp;
         fp.effect = p.effect; fp.variant = p.variant; fp.activity = p.activity; fp.repeats = p.repeats;
         fp.shape = p.shape; fp.reverse = p.reverse; fp.stepSamples = p.stepSamples; fp.beatSamples = p.beatSamples;
+        fp.level = playLevel;
         if (p.effect != lastEffect) lastEffect = p.effect;
         if (! delayFx) fx.schedule (hist, onsets, fp);
         fx.render (wetL, wetR, n);
@@ -184,7 +193,7 @@ private:
         ds.warp = p.effect == Warp; ds.variant = p.variant; ds.activity = p.activity; ds.repeats = p.repeats;
         ds.stepSamples = p.stepSamples; ds.reverse = p.reverse;
         // level matched so every effect sits about where your dry signal does
-        static constexpr float trims[kNumEffects] = { 1.7f, 2.4f, 1.7f, 1.15f, 1.5f, 1.1f, 1.45f, 1.0f, 0.8f, 0.72f, 1.0f };
+        static constexpr float trims[kNumEffects] = { 1.7f, 1.0f, 1.7f, 1.15f, 1.5f, 1.1f, 1.15f, 1.0f, 0.8f, 0.72f, 1.0f };
         float wetPeak = 0.0f;
         for (int i = 0; i < n; ++i)
         {
@@ -193,7 +202,7 @@ private:
             {
                 // Shape: a volume contour on what goes into the echoes, from plucked to swelling
                 const float since = onsets.latest < 0 ? 1.0f : clampf ((float) (hist.writePos() - n + i - onsets.latest) / (2.0f * p.beatSamples), 0.0f, 1.0f);
-                const float c = delayFx ? contour (since, p.shape) : 0.0f;
+                const float c = delayFx ? contour (since, p.shape) * contourMakeup (p.shape) : 0.0f;
                 float dl, dr;
                 delay.process (effL[i] * c, effR[i] * c, dl, dr, ds);
                 wetL[i] += dl * dOut; wetR[i] += dr * dOut;
@@ -294,6 +303,29 @@ private:
         l *= vol; r *= vol;
     }
 
+    // How loud you've been playing lately, and a note for every beat a sound is held.
+    // Pads, swells and bowed notes have no attack for the detector to hear, so without this
+    // Strum, Arp, Blocks and the delays' Shape had nothing to work with.
+    void addOnset (float strength)
+    {
+        onsets.add (hist.writePos(), strength);
+        uiOnset.store (true);
+        sinceOnset = 0;
+        envAtOnset = std::max (env, 1.0e-6f);
+    }
+
+    void sustainedNote (float x, float beatSamples)
+    {
+        const float a = std::fabs (x);
+        env += (a - env) * (a > env ? envAtt : envRel);
+        playLevel = env > playLevel ? playLevel + (env - playLevel) * envAtt : playLevel * levelRel;
+        ++sinceOnset;
+        const float gap = std::max (beatSamples, 0.35f * fs);
+        // still sounding at least half as loud as the note began, or getting louder
+        if (sinceOnset > (int) gap && env > std::max (3.0e-5f, 0.1f * playLevel) && env > 0.5f * envAtOnset)
+            addOnset (0.4f);
+    }
+
     void captureHold (float beatSamples)
     {
         holdLen = (int) clampf (beatSamples, 0.35f * fs, 2.0f * fs);
@@ -350,5 +382,7 @@ private:
     std::vector<float> fbL, fbR;
     int lastEffect = -1, lastReverbMode = -1;
     bool delayActive = false;
+    float env = 0.0f, envAtOnset = 0.0f, playLevel = 0.0f, envAtt = 0.01f, envRel = 0.001f, levelRel = 0.9999f;
+    int sinceOnset = 1 << 29;
 };
 } // namespace spk

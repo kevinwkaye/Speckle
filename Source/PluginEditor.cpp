@@ -552,8 +552,11 @@ void FootSwitch::paint (Graphics& g)
     const String big = bypassStyle ? (on ? "BYPASSED" : "ON") : (on ? "HELD" : "HOLD");
     g.drawText (big, text.removeFromTop (r.getHeight() * 0.6f).withTrimmedTop (6.0f), Justification::bottomLeft, false);
     const bool tails = proc.apvts.getRawParameterValue (ParamIDs::trails)->load() > 0.5f;
-    const String small = bypassStyle ? (tails ? "TAP TO BYPASS · TRAILS" : "TAP TO BYPASS · CUT") : (on ? "TAP TO RELEASE" : "FREEZE THE LAST BEAT");
+    const String small = bypassStyle ? (tails ? "TRAILS ON" : "TRAILS OFF") : (on ? "TAP TO RELEASE" : "FREEZE A BEAT");
     ff::label (g, small, text.toNearestInt(), Justification::topLeft, ff::dim, 11.0f);
+    // which footswitch does the same job
+    ff::label (g, bypassStyle ? "A" : "B", r.removeFromRight (14.0f).removeFromTop (18.0f).translated (-6.0f, 4.0f).toNearestInt(),
+               Justification::centred, ff::faint.brighter (0.3f), 11.0f);
 }
 
 // =====================================================================================
@@ -562,7 +565,7 @@ void FootSwitch::paint (Graphics& g)
 Rectangle<float> PresetBanks::cell (int i) const
 {
     const int bank = i / 4, k = i % 4;
-    return { (float) (bank * 136 + k * 32), 0.0f, 26.0f, 26.0f };
+    return { (float) (3 + bank * 112 + k * 26), 3.0f, 22.0f, 22.0f };
 }
 
 void PresetBanks::paint (Graphics& g)
@@ -577,7 +580,7 @@ void PresetBanks::paint (Graphics& g)
         if (proc.hasPreset (i) || flash)
         {
             g.setColour (flash ? ff::ink : col);
-            g.fillRoundedRectangle (c, 7.0f);
+            g.fillRoundedRectangle (c, 6.0f);
             if (proc.presetHasLoop (i) && ! flash)
             {
                 g.setColour (ff::bg.withAlpha (0.55f));
@@ -587,15 +590,15 @@ void PresetBanks::paint (Graphics& g)
         else
         {
             g.setColour (col.withAlpha (0.45f));
-            g.drawRoundedRectangle (c.reduced (1.0f), 7.0f, 2.0f);
+            g.drawRoundedRectangle (c.reduced (1.0f), 6.0f, 2.0f);
         }
         if (i == sel)
         {
             g.setColour (ff::ink);
-            g.drawRoundedRectangle (c.expanded (3.0f), 9.0f, 1.5f);
+            g.drawRoundedRectangle (c.expanded (2.5f), 8.0f, 1.5f);
         }
     }
-    ff::label (g, flashUntil > nowSeconds() ? "SAVED" : "TAP TO LOAD · HOLD TO SAVE", { 0, 30, 540, 16 }, Justification::centredLeft, ff::faint.brighter (0.4f), 11.0f);
+    ff::label (g, flashUntil > nowSeconds() ? String ("SAVED") : String::fromUTF8 ("TAP TO LOAD · HOLD TO SAVE"), { 0, 32, 440, 16 }, Justification::centredLeft, ff::faint.brighter (0.4f), 11.0f);
 }
 
 void PresetBanks::mouseDown (const MouseEvent& e)
@@ -631,6 +634,203 @@ void PresetBanks::mouseUp (const MouseEvent&)
 }
 
 // =====================================================================================
+// Footswitches and expression
+// =====================================================================================
+void ActionChip::paint (Graphics& g) { pill (g, getLocalBounds().toFloat().reduced (1.0f), text, lit, size); }
+
+FootswitchCard::FootswitchCard (SpeckleProcessor& p, int s)
+    : proc (p), sw (s),
+      learn ("LEARN", [this] { proc.learnFootswitch (sw); }),
+      reset ("DEFAULTS", [this] { proc.resetFootswitches(); })
+{
+    letter.setTextHeight (54.0f);
+    letter.setValue (String::charToString ((juce_wchar) ('A' + s)));
+    addAndMakeVisible (letter);
+    addAndMakeVisible (learn);
+    addAndMakeVisible (reset);
+    if (s == 0)
+    {
+        trails = std::make_unique<ToggleChip> (p.apvts, ParamIDs::trails, "TRAILS OFF", "TRAILS ON", true, 12.0f);
+        addAndMakeVisible (*trails);
+    }
+}
+
+void FootswitchCard::resized()
+{
+    letter.setBounds (16, 42, 258, 96);
+    if (trails) trails->setBounds (16, 304, 124, 28);
+    learn.setBounds (16, 390, 124, 34);
+    reset.setBounds (150, 390, 124, 34);
+}
+
+void FootswitchCard::paint (Graphics& g)
+{
+    g.setColour (ff::face);
+    g.fillRoundedRectangle (getLocalBounds().toFloat(), 12.0f);
+    ff::label (g, "FOOTSWITCH", { 16, 14, 258, 18 });
+
+    const bool burst = proc.apvts.getRawParameterValue (ParamIDs::burst)->load() > 0.5f;
+    static const char* const tapJobs[4] = { "BYPASS", "HOLD ON / OFF", "REC / PLAY / DUB", "STOP / PLAY" };
+    static const char* const holdJobs[4] = { "REVERSE WHILE HELD", "HOLD WHILE HELD", "UNDO OVERDUB", "ERASE LOOP" };
+    static const char* const notes[4] = { "BYPASS LETS THE EFFECT RING OUT", "FREEZES THE LAST BEAT", "ACTS THE MOMENT YOUR FOOT LANDS", "STOPPED: TAP TO PLAY FROM THE TOP" };
+    static const char* const combos[4] = { "A+B  NEXT EFFECT", "A+B  NEXT EFFECT", "C+D  NEXT SPECKLE, HOLD 1 S TO KEEP", "C+D  NEXT SPECKLE, HOLD 1 S TO KEEP" };
+    struct Row { const char* k; String v; };
+    const Row rows[3] = { { "TAP", sw == 2 && burst ? String ("RECORD WHILE HELD") : String (tapJobs[sw]) },
+                          { "HOLD", sw == 2 && burst ? String ("BURST IS ON") : String (holdJobs[sw]) },
+                          { "LISTENS FOR", sends } };
+    int y = 150;
+    for (const auto& r : rows)
+    {
+        g.setColour (ff::ring);
+        g.fillRect (16, y, 258, 2);
+        ff::label (g, r.k, { 16, y + 4, 120, 30 }, Justification::centredLeft, ff::dim, 13.0f);
+        ff::label (g, r.v, { 110, y + 4, 164, 30 }, Justification::centredRight, ff::ink, 14.0f);
+        y += 38;
+    }
+    g.setColour (ff::ring);
+    g.fillRect (16, y, 258, 2);
+    ff::label (g, notes[sw], { 16, y + 8, 258, 18 }, Justification::centredLeft, ff::dim, 11.0f);
+    ff::label (g, combos[sw], { 16, y + (sw == 0 ? 70 : 32), 258, 18 }, Justification::centredLeft, ff::dim, 11.0f);
+}
+
+void FootswitchCard::tick()
+{
+    const auto& st = proc.pedals();
+    const String t = proc.pedalsDirect() ? "CC " + String (st.fsCC[(size_t) sw]) + String::fromUTF8 (" · ANY CH")
+                                         : "CH " + String (st.fsChannel[(size_t) sw]) + String::fromUTF8 (" · CC ") + String (st.fsCC[(size_t) sw]);
+    if (t != sends) { sends = t; repaint(); }
+    learn.setLit (proc.learningWhat() == sw);
+    learn.setText (proc.learningWhat() == sw ? "PRESS IT NOW" : "LEARN");
+    const bool down = (proc.uiFootDown.load() >> sw) & 1;
+    letter.setAlpha (down ? 0.6f : 1.0f);
+}
+
+void BigButton::set (const String& m, const String& sm, Colour c)
+{
+    if (m == mainText && sm == smallText && c == borderColour) return;
+    mainText = m; smallText = sm; borderColour = c;
+    repaint();
+}
+
+void BigButton::paint (Graphics& g)
+{
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (pressed ? ff::ring : ff::bg);
+    g.fillRoundedRectangle (b, b.getHeight() * 0.5f);
+    g.setColour (borderColour);
+    g.drawRoundedRectangle (b, b.getHeight() * 0.5f, 2.0f);
+    const float big = 13.0f, small = 9.5f;
+    const float top = b.getCentreY() - (big + small + 1.0f) * 0.5f;
+    ff::label (g, mainText, Rectangle<float> (b.getX(), top, b.getWidth(), big).toNearestInt(), Justification::centred, ff::ink, big);
+    ff::label (g, smallText, Rectangle<float> (b.getX(), top + big + 1.0f, b.getWidth(), small).toNearestInt(), Justification::centred, ff::dim, small);
+}
+
+void BigButton::mouseDown (const MouseEvent& e)
+{
+    if (e.mods.isPopupMenu()) { if (onRightClick) onRightClick(); return; }
+    pressed = true; repaint();
+    if (onDown) onDown();
+}
+
+void MiniFoot::paint (Graphics& g)
+{
+    const bool down = (proc.uiFootDown.load() >> sw) & 1;
+    auto b = getLocalBounds().toFloat().reduced (1.0f);
+    g.setColour (down ? ff::ink : ff::bg);
+    g.fillRoundedRectangle (b, 7.0f);
+    // lit while its job is on: A the effect, B Hold, C a recording or overdub, D a loop playing
+    const auto& lp = proc.getEngine().getLooper();
+    const int st = lp.uiState.load();
+    using L = spk::Looper;
+    bool lit = false;
+    Colour col = ff::line;
+    if (sw == 0) { lit = proc.apvts.getRawParameterValue (ParamIDs::bypass)->load() < 0.5f; col = ff::red; }
+    if (sw == 1) { lit = proc.apvts.getRawParameterValue (ParamIDs::hold)->load() > 0.5f; col = ff::coral; }
+    if (sw == 2) { lit = st == L::Recording || st == L::Overdubbing; col = st == L::Recording ? ff::red : ff::amber; }
+    if (sw == 3) { lit = st == L::Playing || st == L::Overdubbing; col = ff::teal; }
+    g.setColour (down ? ff::ink : (lit ? col : ff::line));
+    g.drawRoundedRectangle (b.reduced (lit ? 1.0f : 0.0f), 7.0f, lit ? 3.0f : 2.0f);
+    ff::label (g, String::charToString ((juce_wchar) ('A' + sw)), getLocalBounds(), Justification::centred, down ? ff::bg : ff::ink, 14.0f);
+}
+
+void FootInputLabel::paint (Graphics& g)
+{
+    // a dot that lights when the footswitch is plugged in and heard directly
+    g.setColour (proc.pedalsDirect() ? ff::bankG : ff::ring);
+    g.fillEllipse (0.0f, (float) getHeight() * 0.5f - 4.0f, 8.0f, 8.0f);
+    ff::label (g, "FOOTSWITCHES  v", getLocalBounds().withTrimmedLeft (14), Justification::centredLeft, ff::dim, 12.0f);
+}
+
+void FootInputLabel::mouseDown (const MouseEvent&)
+{
+    PopupMenu m;
+    m.addSectionHeader ("Footswitch input");
+    m.addItem (-1, proc.footInputStatus(), false, false);
+    const auto chosen = proc.footDevice();
+    m.addItem (10, "Find my footswitch automatically", true, chosen.isEmpty());
+    const auto devices = DirectMidiInput::deviceNames();
+    for (int i = 0; i < devices.size() && i < 40; ++i)
+        m.addItem (100 + i, "Use " + devices[i], true, chosen == devices[i]);
+    m.addItem (11, "Only from a MIDI track in Ableton", true, chosen == "none");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this, devices] (int r)
+    {
+        if (r == 10) proc.setFootDevice ({});
+        else if (r == 11) proc.setFootDevice ("none");
+        else if (r >= 100 && r - 100 < devices.size()) proc.setFootDevice (devices[r - 100]);
+        repaint();
+    });
+}
+
+void ExpressionMeter::paint (Graphics& g)
+{
+    const auto& t = names::expTargets();
+    const int target = jlimit (0, (int) t.size() - 1, roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load()));
+    String text = String::fromUTF8 ("EXP · ") + String (t[(size_t) target].label).toUpperCase() + "  v";
+    if (proc.isCalibrating()) text = "ROCK HEEL TO TOE";
+    else if (proc.learningWhat() == SpeckleProcessor::LearnExpression) text = "MOVE THE PEDAL";
+    ff::label (g, text, { 0, 0, getWidth(), 16 }, Justification::centredLeft, proc.isCalibrating() ? ff::ink : ff::dim, 11.0f);
+    const float v = proc.expressionLevel();
+    const float x0 = 8.0f, w = (float) getWidth() - 16.0f, y = 24.0f;
+    g.setColour (ff::ring);
+    g.fillRoundedRectangle (x0, y, w, 8.0f, 4.0f);
+    const bool fresh = nowSeconds() - proc.lastExpressionMove() < 1.5;
+    g.setColour (fresh ? ff::ink : ff::dim);
+    g.fillRoundedRectangle (x0, y, w * v, 8.0f, 4.0f);
+    g.fillEllipse (x0 + w * v - 8.0f, y - 4.0f, 16.0f, 16.0f);
+}
+
+void ExpressionMeter::mouseDown (const MouseEvent&)
+{
+    PopupMenu targets;
+    const auto& t = names::expTargets();
+    const int target = roundToInt (proc.apvts.getRawParameterValue (ParamIDs::expTarget)->load());
+    for (int i = 0; i < (int) t.size(); ++i) targets.addItem (100 + i, t[(size_t) i].label, true, i == target);
+    PopupMenu curves;
+    const char* const curveNames[3] = { "Linear", "Slow start", "Fast start" };
+    for (int i = 0; i < 3; ++i) curves.addItem (200 + i, curveNames[i], true, proc.pedals().curve == i);
+    PopupMenu map;
+    map.addItem (300, "Off", true, proc.pedals().pedalMapChannel == 0);
+    for (int ch = 1; ch <= 16; ++ch) map.addItem (300 + ch, "Channel " + String (ch), true, proc.pedals().pedalMapChannel == ch);
+
+    PopupMenu m;
+    m.addSubMenu ("Expression moves", targets);
+    m.addItem (1, "Calibrate heel and toe");
+    m.addItem (2, "Learn expression pedal");
+    m.addSubMenu ("Curve", curves);
+    m.addSeparator();
+    m.addSubMenu ("Original pedal MIDI map", map);
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (this), [this] (int r)
+    {
+        if (r == 1) proc.calibrateExpression();
+        else if (r == 2) proc.learnExpression();
+        else if (r >= 100 && r < 200) setParam (proc.apvts.getParameter (ParamIDs::expTarget), (float) (r - 100));
+        else if (r >= 200 && r < 300) { proc.pedals().curve = r - 200; proc.pedals().save(); }
+        else if (r >= 300) { proc.pedals().pedalMapChannel = r - 300; proc.pedals().save(); }
+        repaint();
+    });
+}
+
+// =====================================================================================
 // Pebble
 // =====================================================================================
 void Pebble::update (double t, double dt)
@@ -647,9 +847,17 @@ void Pebble::update (double t, double dt)
     if (eng.uiOnset.load())
     {
         eng.uiOnset.store (false);
-        hop = 1.0f;
+        hop = jmax (hop, 0.5f);
     }
+    // taps its foot whenever a footswitch goes down
+    const int pulse = proc.uiFootPulse.load();
+    if (pulse != lastPulse) { lastPulse = pulse; hop = 1.0f; }
     hop *= (float) std::exp (-dt / 0.12);
+    nodding *= (float) std::exp (-dt / 0.35);
+    // leans with the expression pedal while it moves
+    const bool expFresh = t - proc.lastExpressionMove() < 2.0;
+    const float leanTarget = expFresh ? (proc.expressionLevel() - 0.5f) * 16.0f : 0.0f;
+    lean += (leanTarget - lean) * (float) (1.0 - std::exp (-dt / 0.1));
     // eyes drift slowly side to side, following the grains
     const float lookTarget = (float) std::sin (t * 0.7) * jlimit (0.0f, 1.0f, wet * 4.0f);
     look += (lookTarget - look) * (float) (1.0 - std::exp (-dt / 0.2));
@@ -672,9 +880,10 @@ void Pebble::paint (Graphics& g)
     const float s = a.getWidth() / 140.0f;
     const float bob = asleep ? 0.0f : 1.5f * (float) std::sin (now * 2.4);
     const float breathe = asleep ? 1.0f + 0.025f * (float) std::sin (now * 1.6) : 1.0f;
-    const float dy = bob - hop * 10.0f;
+    const float dy = bob - hop * 10.0f + 8.0f * nodding * (float) std::sin (nodding * 12.0f); // a happy nod for KEPT
+    const float tilt = degreesToRadians (lean);
     const auto tf = AffineTransform::translation (-100.0f, -100.0f).scaled (s * breathe, s / breathe)
-                        .translated (a.getCentreX(), a.getCentreY() + 6.0f * s);
+                        .rotated (tilt, 0.0f, 50.0f * s).translated (a.getCentreX(), a.getCentreY() + 6.0f * s);
     auto ell = [&] (float cx, float cy, float rx, float ry, Colour col)
     {
         Path p; p.addEllipse (cx - rx, cy - ry, rx * 2, ry * 2);
@@ -752,7 +961,8 @@ SpeckleEditor::SpeckleEditor (SpeckleProcessor& p)
       inputMode (p.apvts, ParamIDs::inputMode, { "GUITAR", "SYNTH", "BASS" }),
       tapButton (p),
       sync (p.apvts, ParamIDs::sync, "SYNC"),
-      trails (p.apvts, ParamIDs::trails, "CUT TAILS", "TRAILS"),
+      viewMain ("MAIN", [this] { setView (View::Main); }, 13.0f),
+      viewPedal ("PEDAL", [this] { setView (View::Pedal); }, 13.0f),
       effectDial (p),
       variant (p.apvts, ParamIDs::variant, { "A", "B", "C", "D" }, 15.0f),
       reverse (p.apvts, ParamIDs::reverse, "FWD", "REV", true, 15.0f),
@@ -783,22 +993,62 @@ SpeckleEditor::SpeckleEditor (SpeckleProcessor& p)
       pebble (p),
       hold (p, ParamIDs::hold, false),
       bypass (p, ParamIDs::bypass, true),
-      banks (p)
+      banks (p),
+      footInput (p),
+      expression (p)
 {
     setLookAndFeel (&lnf);
-    for (auto* c : std::initializer_list<Component*> {
-             &inputMode, &tempoCard, &tapButton, &sync, &trails,
-             &groupCard, &effectCard, &effectDial, &variant, &reverse,
-             &activity, &repeats, &shape, &time, &modDepth, &modRate, &timeMode,
-             &filter, &resonance, &space, &mix, &reverbMode,
-             &loopLevel, &loopSpeed, &fadeTime, &volume, &loopBar, &loopPre, &quantise, &loopReverse, &burst, &loopOnly, &fadeMode,
-             &recButton, &stopButton, &pebble, &hold, &bypass, &banks })
+    mainPage = { &groupCard, &effectCard, &effectDial, &variant, &reverse,
+                 &activity, &repeats, &shape, &time, &modDepth, &modRate, &timeMode,
+                 &filter, &resonance, &space, &mix, &reverbMode,
+                 &loopLevel, &loopSpeed, &fadeTime, &volume, &loopBar, &loopPre, &quantise, &loopReverse, &burst, &loopOnly, &fadeMode,
+                 &recButton, &stopButton };
+    for (auto* c : mainPage) addAndMakeVisible (c);
+    for (auto* c : std::initializer_list<Component*> { &inputMode, &tempoCard, &tapButton, &sync, &viewMain, &viewPedal,
+                                                       &pebble, &hold, &bypass, &banks, &footInput, &expression, &keepButton, &contextCard })
         addAndMakeVisible (c);
+    for (int k = 0; k < 4; ++k)
+    {
+        footCards[(size_t) k] = std::make_unique<FootswitchCard> (p, k);
+        addChildComponent (*footCards[(size_t) k]);
+        minis[(size_t) k] = std::make_unique<MiniFoot> (p, k);
+        addAndMakeVisible (*minis[(size_t) k]);
+    }
 
     tempoCard.setTextHeight (22.0f);
+    tempoCard.setMouseCursor (MouseCursor::PointingHandCursor);
+    tempoCard.onClick = [this] (const MouseEvent&) { proc.tap(); };
     groupCard.setTextHeight (32.0f);
     effectCard.setTextHeight (30.0f);
 
+    // Keeper: click to log the moment, right-click for notes, export and the folder
+    keepButton.set ("KEEP", "HOLD C+D", ff::line);
+    keepButton.onDown = [this] { proc.keepNow(); };
+    keepButton.onRightClick = [this] { keeperMenu(); };
+    contextCard.setTextHeight (12.0f);
+    contextCard.setMouseCursor (MouseCursor::PointingHandCursor);
+    contextCard.setValue (proc.keeperLive() ? "LIVE" : "STUDIO");
+    contextCard.onClick = [this] (const MouseEvent&)
+    {
+        proc.setKeeperLive (! proc.keeperLive());
+        contextCard.setValue (proc.keeperLive() ? "LIVE" : "STUDIO");
+        proc.say (proc.keeperLive() ? "LIVE" : "STUDIO");
+    };
+    addChildComponent (noteEditor);
+    noteEditor.setTextToShowWhenEmpty ("Optional, Enter to save", ff::faint);
+    noteEditor.setFont (FontOptions (13.0f));
+    noteEditor.setIndents (10, 7);
+    noteEditor.setColour (TextEditor::backgroundColourId, ff::bg);
+    noteEditor.setColour (TextEditor::textColourId, ff::ink);
+    noteEditor.setColour (TextEditor::outlineColourId, ff::line);
+    noteEditor.setColour (TextEditor::focusedOutlineColourId, ff::ink);
+    noteEditor.setColour (CaretComponent::caretColourId, ff::ink);
+    noteEditor.setInputRestrictions (200);
+    noteEditor.onReturnKey = [this] { closeNote (true); };
+    noteEditor.onEscapeKey = [this] { closeNote (false); };
+    noteEditor.onTextChange = [this] { noteUntil = Time::getMillisecondCounterHiRes() * 0.001 + 20.0; };
+
+    setView (View::Main);
     setSize (1260, 660);
     lastTick = Time::getMillisecondCounterHiRes() * 0.001;
     startTimerHz (60);
@@ -808,6 +1058,51 @@ SpeckleEditor::~SpeckleEditor()
 {
     stopTimer();
     setLookAndFeel (nullptr);
+}
+
+void SpeckleEditor::setView (View v)
+{
+    view = v;
+    for (auto* c : mainPage) c->setVisible (v == View::Main);
+    for (auto& c : footCards) c->setVisible (v == View::Pedal);
+    viewMain.setLit (v == View::Main);
+    viewPedal.setLit (v == View::Pedal);
+    repaint();
+}
+
+void SpeckleEditor::keeperMenu()
+{
+    PopupMenu m;
+    m.addItem (1, "Add a note to Keeper No. " + String (proc.lastKeeper()), proc.lastKeeper() > 0);
+    m.addItem (2, "Export for Claude");
+    m.addItem (3, "Open the Keepers folder");
+    m.addSeparator();
+    m.addItem (4, "Learn a Keeper footswitch");
+    m.showMenuAsync (PopupMenu::Options().withTargetComponent (&keepButton), [this] (int r)
+    {
+        if (r == 1)
+        {
+            noteNumber = proc.lastKeeper();
+            noteEditor.clear();
+            noteEditor.setVisible (true);
+            noteEditor.grabKeyboardFocus();
+            noteUntil = Time::getMillisecondCounterHiRes() * 0.001 + 20.0;
+            repaint (136, 540, 190, 100);
+        }
+        else if (r == 2) proc.exportKeepers();
+        else if (r == 3) proc.openKeepersFolder();
+        else if (r == 4) proc.learnKeeper();
+    });
+}
+
+void SpeckleEditor::closeNote (bool save)
+{
+    if (save) proc.addKeeperNote (noteNumber, noteEditor.getText());
+    if (save && noteEditor.getText().trim().isNotEmpty()) proc.say ("NOTED");
+    noteEditor.setVisible (false);
+    noteEditor.clear();
+    noteUntil = 0.0;
+    repaint (136, 540, 190, 100);
 }
 
 void SpeckleEditor::section (Graphics& g, Rectangle<int> r) const
@@ -822,41 +1117,49 @@ void SpeckleEditor::paint (Graphics& g)
     g.setColour (ff::ink);
     g.setFont (ff::font (26.0f, 0.04f));
     g.drawText ("SPECKLE", 20, 20, 130, 40, Justification::centredLeft, false);
-    ff::label (g, "SCATTERED SAMPLES, SPARKLING SPACE", { 146, 20, 310, 40 });
-    ff::label (g, "INPUT", { 466, 20, 50, 40 });
-    ff::label (g, "TEMPO", { 780, 20, 56, 40 });
+    ff::label (g, "SCATTERED SAMPLES, SPARKLING SPACE", { 146, 20, 300, 40 });
+    ff::label (g, "INPUT", { 456, 20, 50, 40 });
+    ff::label (g, "TEMPO", { 748, 20, 56, 40 });
 
-    section (g, { 20, 76, 400, 440 });
-    section (g, { 440, 76, 250, 440 });
-    section (g, { 710, 76, 250, 440 });
-    section (g, { 980, 76, 260, 440 });
+    if (view == View::Main)
+    {
+        section (g, { 20, 76, 400, 440 });
+        section (g, { 440, 76, 250, 440 });
+        section (g, { 710, 76, 250, 440 });
+        section (g, { 980, 76, 260, 440 });
+
+        ff::label (g, "EFFECT", { 36, 92, 200, 16 });
+        ff::label (g, "SHAPE", { 456, 92, 200, 16 });
+        ff::label (g, "TONE + SPACE", { 726, 92, 200, 16 });
+        ff::label (g, "PHRASE LOOPER", { 996, 92, 120, 16 });
+        ff::label (g, loopStatus, { 1104, 92, 120, 16 }, Justification::centredRight, ff::ink);
+
+        ff::label (g, timeHint, { 456, 472, 218, 24 }, Justification::centred, ff::faint.brighter (0.4f), 12.0f);
+        ff::label (g, "REVERB", { 726, 386, 120, 18 });
+        ff::label (g, String::fromUTF8 ("MODE · ") + reverbName, { 726, 452, 218, 20 }, Justification::centredLeft, ff::dim, 12.0f);
+    }
+
     section (g, { 20, 532, 1220, 112 });
-
-    ff::label (g, "EFFECT", { 36, 92, 200, 16 });
-    ff::label (g, "SHAPE", { 456, 92, 200, 16 });
-    ff::label (g, "TONE + SPACE", { 726, 92, 200, 16 });
-    ff::label (g, "PHRASE LOOPER", { 996, 92, 120, 16 });
-    ff::label (g, loopStatus, { 1104, 92, 120, 16 }, Justification::centredRight, ff::ink);
-
-    ff::label (g, timeHint, { 456, 472, 218, 24 }, Justification::centred, ff::faint.brighter (0.4f), 12.0f);
-    ff::label (g, "REVERB", { 726, 386, 120, 18 });
-    ff::label (g, String::fromUTF8 ("MODE · ") + reverbName, { 726, 452, 218, 20 }, Justification::centredLeft, ff::dim, 12.0f);
-
-    ff::label (g, "HOLD SAMPLER", { 140, 552, 170, 18 });
-    ff::label (g, holdStatus, { 140, 570, 170, 32 }, Justification::centredLeft, ff::ink, 22.0f);
-    ff::label (g, proc.apvts.getRawParameterValue (ParamIDs::hold)->load() > 0.5f ? "PEBBLE HOLDS ITS BREATH" : "FEEDS THE EFFECT ON A LOOP",
-               { 140, 602, 180, 18 }, Justification::centredLeft, ff::dim, 11.0f);
-    ff::label (g, String::fromUTF8 ("USER PRESETS · LOOPS SAVE WITH THEM"), { 500, 548, 520, 18 });
+    if (noteEditor.isVisible())
+        ff::label (g, "KEPT No. " + String (noteNumber) + String::fromUTF8 (" · ADD A NOTE?"), { 140, 546, 180, 16 }, Justification::centredLeft, ff::ink, 12.0f);
+    else
+    {
+        ff::label (g, "PEBBLE", { 140, 542, 180, 16 });
+        ff::label (g, mood, { 140, 558, 180, 28 }, Justification::centredLeft, ff::ink, 21.0f);
+        ff::label (g, moodSub, { 140, 584, 180, 16 }, Justification::centredLeft, ff::dim, 11.0f);
+    }
+    ff::label (g, String::fromUTF8 ("USER PRESETS · LOOPS SAVE WITH THEM"), { 496, 546, 440, 18 });
 }
 
 void SpeckleEditor::resized()
 {
     // header
-    inputMode.setBounds (520, 24, 230, 32);
-    tempoCard.setBounds (840, 20, 92, 40);
-    tapButton.setBounds (942, 24, 64, 32);
-    sync.setBounds (1014, 24, 76, 32);
-    trails.setBounds (1104, 24, 136, 32);
+    inputMode.setBounds (506, 24, 226, 32);
+    tempoCard.setBounds (804, 20, 84, 40);
+    tapButton.setBounds (898, 24, 62, 32);
+    sync.setBounds (968, 24, 66, 32);
+    viewMain.setBounds (1094, 24, 70, 32);
+    viewPedal.setBounds (1170, 24, 70, 32);
 
     // effect
     groupCard.setBounds (36, 120, 226, 72);
@@ -897,11 +1200,20 @@ void SpeckleEditor::resized()
     recButton.setBounds (996, 476, 110, 34);
     stopButton.setBounds (1114, 476, 110, 34);
 
-    // strip
-    pebble.setBounds (36, 540, 90, 96);
-    hold.setBounds (322, 556, 156, 64);
-    banks.setBounds (500, 574, 540, 48);
-    bypass.setBounds (1060, 556, 164, 64);
+    // pedal page: one card per footswitch
+    for (int k = 0; k < 4; ++k) footCards[(size_t) k]->setBounds (20 + k * 310, 76, 290, 440);
+
+    // the strip, left to right: Pebble and Keeper, Hold, presets, footswitches, bypass
+    pebble.setBounds (32, 540, 96, 98);
+    noteEditor.setBounds (140, 566, 180, 30);
+    keepButton.setBounds (140, 604, 96, 32);
+    contextCard.setBounds (244, 604, 76, 32);
+    hold.setBounds (332, 556, 148, 64);
+    banks.setBounds (493, 568, 440, 50);
+    footInput.setBounds (948, 542, 142, 20);
+    for (int k = 0; k < 4; ++k) minis[(size_t) k]->setBounds (948 + k * 37, 566, 31, 30);
+    expression.setBounds (948, 602, 142, 36);
+    bypass.setBounds (1102, 556, 122, 64);
 }
 
 void SpeckleEditor::timerCallback()
@@ -911,8 +1223,9 @@ void SpeckleEditor::timerCallback()
     lastTick = now;
     auto& s = proc.apvts;
 
-    for (auto* c : { &tempoCard, &groupCard, &effectCard })
+    for (auto* c : { &tempoCard, &groupCard, &effectCard, &contextCard })
         c->advance (dt);
+    for (auto& c : footCards) c->tick();
 
     // flip cards: group, effect and variation, tempo
     const int fx = jlimit (0, spk::kNumEffects - 1, roundToInt (s.getRawParameterValue (ParamIDs::effect)->load()));
@@ -921,6 +1234,9 @@ void SpeckleEditor::timerCallback()
     groupCard.setValue (names::groups[fx].toUpperCase());
     effectCard.setValue (String (shortNames[fx]) + " " + String::charToString ((juce_wchar) ('A' + var)));
     tempoCard.setValue (String (roundToInt (proc.currentBpm())));
+    sync.setAlpha (proc.hostSynced() || s.getRawParameterValue (ParamIDs::sync)->load() < 0.5f ? 1.0f : 0.6f);
+    if (lastEffect >= 0 && fx != lastEffect) proc.say (names::effects[fx].toUpperCase());
+    lastEffect = fx;
 
     // the Time knob sets the subdivision, or the tempo itself in Tempo mode
     const int tm = roundToInt (s.getRawParameterValue (ParamIDs::timeMode)->load());
@@ -947,13 +1263,43 @@ void SpeckleEditor::timerCallback()
         case L::Stopping: case L::Stopped: ls = "STOPPED"; break;
         default: ls = "EMPTY"; break;
     }
-    const String hs = s.getRawParameterValue (ParamIDs::hold)->load() > 0.5f ? "HELD" : "LISTENING";
 
-    if (hint != timeHint || rv != reverbName || ls != loopStatus || hs != holdStatus)
+    // Pebble's status lines
+    String m, sub;
+    const bool held = s.getRawParameterValue (ParamIDs::hold)->load() > 0.5f;
+    if (now - proc.uiMessageAt < 2.5 && proc.uiMessage.isNotEmpty()) { m = proc.uiMessage; sub = "PEBBLE IS ON IT"; }
+    else if (s.getRawParameterValue (ParamIDs::bypass)->load() > 0.5f) { m = "NAPPING"; sub = "BYPASSED"; }
+    else if (held) { m = "HOLDING"; sub = "A BEAT IS FROZEN"; }
+    else if (st == L::Recording) { m = "RECORDING"; sub = "TAP REC TO LOOP IT"; }
+    else if (st == L::Overdubbing) { m = "LAYERING"; sub = "OVERDUBBING THE LOOP"; }
+    else if (st == L::Playing) { m = "LOOPING"; sub = String (secs, 1) + " S PHRASE"; }
+    else { m = "LISTENING"; sub = names::effects[fx].toUpperCase() + " " + String::charToString ((juce_wchar) ('A' + var)); }
+
+    if (hint != timeHint || rv != reverbName || ls != loopStatus || m != mood || sub != moodSub)
     {
-        timeHint = hint; reverbName = rv; loopStatus = ls; holdStatus = hs;
+        timeHint = hint; reverbName = rv; loopStatus = ls; mood = m; moodSub = sub;
         repaint();
     }
+
+    // Keeper: flip to KEPT, Pebble nods, offer a note for ten seconds without taking the keyboard
+    const int kp = proc.uiKeepPulse.load();
+    if (kp != lastKeepPulse)
+    {
+        lastKeepPulse = kp;
+        keptUntil = now + 1.8;
+        contextCard.setValue ("KEPT");
+        pebble.nod();
+        noteNumber = 0;
+        noteEditor.clear();
+        noteEditor.setVisible (true);
+        noteUntil = now + 10.0;
+        repaint (136, 540, 190, 100);
+    }
+    if (noteNumber == 0 && proc.lastKeeper() > 0 && noteEditor.isVisible()) { noteNumber = proc.lastKeeper(); repaint (136, 540, 190, 100); }
+    if (keptUntil > 0.0 && now > keptUntil) { keptUntil = 0.0; contextCard.setValue (proc.keeperLive() ? "LIVE" : "STUDIO"); }
+    if (noteEditor.isVisible() && now > noteUntil && ! noteEditor.hasKeyboardFocus (true)) closeNote (false);
+    const bool learningKeep = proc.learningWhat() == SpeckleProcessor::LearnKeeper;
+    keepButton.set (learningKeep ? "PRESS IT" : "KEEP", learningKeep ? "YOUR SWITCH" : "HOLD C+D", learningKeep ? ff::ink : ff::line);
 
     pebble.update (now, dt);
     loopBar.repaint();
@@ -962,4 +1308,9 @@ void SpeckleEditor::timerCallback()
     tapButton.repaint();
     effectDial.repaint();
     banks.repaint();
+    hold.repaint();
+    bypass.repaint();
+    expression.repaint();
+    footInput.repaint();
+    for (auto& mf : minis) mf->repaint();
 }
